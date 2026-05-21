@@ -1,13 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import {
   AlertCircle, CheckCircle2, Loader2, Mic, Paperclip, RefreshCw,
   Send, Volume2, VolumeX,
 } from 'lucide-react'
 
+// Hermes likes to format with markdown (bold, lists, code). Rendering it as
+// HTML keeps the chat bubbles readable instead of showing raw `**` and `-`.
+// react-markdown defaults to CommonMark + no raw HTML, which is the safe
+// posture for content coming back from any LLM — even our trusted local one.
+const MARKDOWN_COMPONENTS = {
+  p: ({ children }) => <p className="break-words [&:not(:first-child)]:mt-3">{children}</p>,
+  ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-5">{children}</ul>,
+  ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-5">{children}</ol>,
+  li: ({ children }) => <li className="break-words">{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+  em: ({ children }) => <em className="italic">{children}</em>,
+  h1: ({ children }) => <h1 className="my-2 text-lg font-semibold">{children}</h1>,
+  h2: ({ children }) => <h2 className="my-2 text-base font-semibold">{children}</h2>,
+  h3: ({ children }) => <h3 className="my-2 text-sm font-semibold uppercase tracking-wide">{children}</h3>,
+  a: ({ href, children }) => (
+    <a href={href} target="_blank" rel="noreferrer" className="underline decoration-zinc-400 underline-offset-2 hover:decoration-zinc-700">{children}</a>
+  ),
+  code: ({ inline, children }) => inline
+    ? <code className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-[13px] text-zinc-800">{children}</code>
+    : <code className="block whitespace-pre-wrap break-words rounded bg-zinc-100 p-2 font-mono text-[13px] text-zinc-800">{children}</code>,
+  pre: ({ children }) => <pre className="my-2 overflow-x-auto rounded bg-zinc-100">{children}</pre>,
+  blockquote: ({ children }) => <blockquote className="my-2 border-l-2 border-zinc-300 pl-3 italic text-zinc-700">{children}</blockquote>,
+  hr: () => <hr className="my-3 border-zinc-200" />,
+}
+
 const welcomeMessage = {
   id: 'welcome',
   role: 'assistant',
-  text: 'Hi. I am Dream Server. Ask me anything and I will keep it local to this box.',
+  text: "Hey, I'm Dream — your local AI buddy, running entirely on your own hardware. Nothing leaves this box.\n\nTry me: ask anything, draft an email, run some code, plan a trip, or just chat. Or hit the mic and talk to me.",
   status: 'done',
 }
 
@@ -45,6 +71,7 @@ export default function DreamTalk() {
   const fileInputRef = useRef(null)
   const recorderRef = useRef(null)
   const recordingChunksRef = useRef([])
+  const streamControllerRef = useRef(null)
 
   const liveMicSupported = useMemo(() => {
     return Boolean(
@@ -94,6 +121,13 @@ export default function DreamTalk() {
     }
   }, [spokenReplies])
 
+  useEffect(() => {
+    return () => {
+      streamControllerRef.current?.abort()
+      streamControllerRef.current = null
+    }
+  }, [])
+
   const speak = useCallback(async (text) => {
     if (!spokenReplies || !voiceState.tts || !text.trim()) return
     try {
@@ -129,34 +163,100 @@ export default function DreamTalk() {
     setMessages(items => [...items, { id: assistantId, role: 'assistant', text: '', status: 'pending' }])
     setInput('')
 
+    // Live-streamed reply via SSE. The endpoint emits one JSON object per
+    // ``data:`` frame: {type: "session" | "delta" | "complete" | "error" | "done"}.
+    // We append delta text into the assistant bubble as each frame arrives, then
+    // finalise the bubble on the ``complete`` frame. The ``done`` frame is
+    // always last (even after an error) so the loop terminates cleanly.
+    let assembled = ''
+    let finalWarning = null
+    let errorDetail = null
+
+    // AbortController so navigating away / re-sending mid-flight cancels the
+    // in-flight stream. Server-side the bridge stops pulling from llama-server
+    // when the connection drops, freeing the slot for the next request.
+    const controller = new AbortController()
+    streamControllerRef.current?.abort()
+    streamControllerRef.current = controller
     try {
-      const resp = await fetch('/api/talk/message', {
+      const resp = await fetch('/api/talk/message/stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
         credentials: 'same-origin',
         body: JSON.stringify({ text: clean }),
+        signal: controller.signal,
       })
       if (resp.status === 401) {
         setStatus('expired')
         setStatusText('Session expired. Scan the owner card again.')
         throw new Error('Session expired.')
       }
-      if (!resp.ok) throw new Error(await parseError(resp, 'Hermes did not answer.'))
-      const data = await resp.json()
-      const reply = data.text || 'I did not get a response back.'
+      if (!resp.ok || !resp.body) {
+        throw new Error(await parseError(resp, 'Hermes did not answer.'))
+      }
+
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      // SSE frames are separated by a blank line (\n\n). Buffer partial frames
+      // across reads — chunked transport can split mid-frame. Lines starting
+      // with ``:`` are SSE comments (keepalives); we discard them by filtering
+      // for ``data:`` only below.
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let sepIdx
+        while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+          const frame = buffer.slice(0, sepIdx)
+          buffer = buffer.slice(sepIdx + 2)
+          const dataLines = frame.split('\n').filter(line => line.startsWith('data:'))
+          if (dataLines.length === 0) continue
+          const json = dataLines.map(l => l.slice(5).trimStart()).join('\n')
+          let payload
+          try {
+            payload = JSON.parse(json)
+          } catch {
+            continue
+          }
+          if (payload.type === 'delta' && typeof payload.text === 'string') {
+            assembled += payload.text
+            const snapshot = assembled
+            setMessages(items => items.map(item =>
+              item.id === assistantId ? { ...item, text: snapshot, status: 'pending' } : item,
+            ))
+          } else if (payload.type === 'complete') {
+            if (typeof payload.text === 'string' && payload.text) assembled = payload.text
+            finalWarning = payload.warning || null
+          } else if (payload.type === 'error') {
+            errorDetail = payload.detail || 'Hermes did not finish the response.'
+          }
+        }
+      }
+
+      if (errorDetail) throw new Error(errorDetail)
+      const reply = assembled || 'I did not get a response back.'
       setMessages(items => items.map(item =>
         item.id === assistantId
-          ? { ...item, text: reply, status: 'done', warning: data.warning || null }
+          ? { ...item, text: reply, status: 'done', warning: finalWarning }
           : item,
       ))
       speak(reply)
     } catch (err) {
-      setMessages(items => items.map(item =>
-        item.id === assistantId
-          ? { ...item, text: err.message || 'Something went wrong.', status: 'error' }
-          : item,
-      ))
+      if (err.name === 'AbortError') {
+        // User-initiated cancellation. Drop the placeholder bubble silently.
+        setMessages(items => items.filter(item => item.id !== assistantId))
+      } else {
+        setMessages(items => items.map(item =>
+          item.id === assistantId
+            ? { ...item, text: err.message || 'Something went wrong.', status: 'error' }
+            : item,
+        ))
+      }
     } finally {
+      if (streamControllerRef.current === controller) {
+        streamControllerRef.current = null
+      }
       setSending(false)
     }
   }, [sending, speak, status])
@@ -409,8 +509,15 @@ function MessageBubble({ message }) {
             <Loader2 size={14} className="animate-spin" />
             Thinking
           </span>
-        ) : (
+        ) : user || message.status === 'error' ? (
+          // User messages and error bubbles stay as plain text — markdown
+          // in those contexts would let typos render as headings or
+          // accidental bold, which we don't want.
           <p className="whitespace-pre-wrap break-words">{message.text}</p>
+        ) : (
+          <div className="space-y-0 text-[15px] leading-6">
+            <ReactMarkdown components={MARKDOWN_COMPONENTS}>{message.text}</ReactMarkdown>
+          </div>
         )}
         {message.warning && (
           <p className="mt-2 text-xs text-amber-600">{message.warning}</p>
