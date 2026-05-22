@@ -18,7 +18,7 @@ from typing import Any, AsyncIterator
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 import hermes_bridge
 import session_signer
