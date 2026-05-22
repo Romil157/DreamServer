@@ -233,23 +233,56 @@ async def _transcribe_bytes(data: bytes, filename: str, content_type: str) -> st
     return text.strip()
 
 
-async def _speak_text(text: str) -> tuple[bytes, str]:
+async def _stream_speech(text: str) -> AsyncIterator[bytes]:
+    """Stream MP3 bytes from Kokoro as they arrive instead of buffering the
+    whole reply before sending anything back to the SPA.
+
+    Kokoro already supports streaming (``stream: true`` is its default; we
+    just used to throw it away by reading ``resp.content``). For a typical
+    multi-sentence Hermes reply Kokoro emits its first audio chunk in
+    ~500ms-1s while the full mux still takes 5-15s — so streaming cuts
+    time-to-first-audio from "wait for whole mp3" to "wait for one
+    sentence." That's the difference between a 7-second silent pause and
+    nearly-instant playback for the operator on Dream Talk.
+
+    On a mid-stream Kokoro error we log + end the response cleanly. The
+    browser then hears truncated audio (half a sentence) rather than
+    silence — strictly better UX than the previous buffer-then-503
+    failure mode, which the SPA had to silently swallow.
+    """
+    payload = {
+        "model": _tts_model(),
+        "voice": _tts_voice(),
+        "input": text,
+        "response_format": "mp3",
+        # Explicitly request streaming. Kokoro's default is true but the
+        # request schema lets clients override; pinning makes the
+        # contract obvious to anyone tracing the call.
+        "stream": True,
+    }
+    timeout = httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=10.0)
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream(
+                "POST",
                 f"{_tts_url()}/v1/audio/speech",
-                json={
-                    "model": _tts_model(),
-                    "voice": _tts_voice(),
-                    "input": text,
-                    "response_format": "mp3",
-                },
-            )
-            resp.raise_for_status()
-            media_type = resp.headers.get("content-type") or "audio/mpeg"
-            return resp.content, media_type
-    except httpx.HTTPError as exc:
-        raise HTTPException(status_code=503, detail="Text-to-speech is not available right now.") from exc
+                json=payload,
+            ) as resp:
+                if resp.status_code >= 400:
+                    body = await resp.aread()
+                    logger.warning(
+                        "kokoro returned %s for /v1/audio/speech: %s",
+                        resp.status_code, body.decode("utf-8", errors="replace")[:200],
+                    )
+                    return
+                async for chunk in resp.aiter_bytes():
+                    if chunk:
+                        yield chunk
+    except (httpx.HTTPError, httpx.StreamError) as exc:
+        # Mid-stream errors: log + return. The browser sees the response
+        # close early and plays whatever audio it already buffered.
+        logger.warning("kokoro stream ended early: %s", exc)
+        return
 
 
 async def _send_to_hermes(session_key: str, text: str) -> dict[str, Any]:
@@ -663,12 +696,29 @@ async def talk_audio_message(request: Request, file: UploadFile = File(...)) -> 
 
 
 @router.post("/api/talk/speak")
-async def talk_speak(request: Request, text: str = Form(...)) -> Response:
+async def talk_speak(request: Request, text: str = Form(...)) -> StreamingResponse:
+    """Stream MP3 audio for ``text`` as Kokoro produces it.
+
+    The SPA's preferred consumption path is the browser's ``MediaSource`` API
+    fed from ``fetch().response.body``, which plays audio chunks as they
+    arrive (first audible token within ~500ms-1s). Browsers without
+    ``MediaSource`` fall back to collecting the full body into a Blob
+    before playback — same wall-clock as today, but no regression.
+    """
     _session_key, _expires_at = _require_session(request)
     clean = text.strip()
     if not clean:
         raise HTTPException(status_code=422, detail="Text is required.")
     if len(clean) > MAX_MESSAGE_CHARS:
         raise HTTPException(status_code=413, detail="Text is too long.")
-    audio, media_type = await _speak_text(clean)
-    return Response(content=audio, media_type=media_type)
+    return StreamingResponse(
+        _stream_speech(clean),
+        media_type="audio/mpeg",
+        # X-Accel-Buffering: no tells nginx (and similar reverse proxies)
+        # NOT to buffer the audio stream — otherwise our streaming work
+        # gets re-buffered into the same multi-second delay we just removed.
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )

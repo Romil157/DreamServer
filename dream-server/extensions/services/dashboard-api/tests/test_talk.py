@@ -86,17 +86,43 @@ def test_talk_audio_message_transcribes_and_routes(talk_client, monkeypatch):
     assert data["text"] == "answer to what is running locally"
 
 
-def test_talk_speak_returns_audio(talk_client, monkeypatch):
-    async def fake_speak(text):
+def test_talk_speak_streams_audio(talk_client, monkeypatch):
+    """The /api/talk/speak endpoint streams MP3 bytes from Kokoro as they
+    arrive (instead of buffering the whole reply into a single Response).
+    Verify the streamed bytes are concatenated correctly + the right
+    headers are set so reverse proxies don't re-buffer the stream."""
+    async def fake_stream(text):
         assert text == "read this"
-        return b"mp3 bytes", "audio/mpeg"
+        # Simulate Kokoro emitting two chunks as the audio synthesises.
+        yield b"mp3 chunk 1 "
+        yield b"mp3 chunk 2"
 
-    monkeypatch.setattr("routers.talk._speak_text", fake_speak)
+    monkeypatch.setattr("routers.talk._stream_speech", fake_stream)
 
     resp = talk_client.post("/api/talk/speak", data={"text": "read this"})
     assert resp.status_code == 200, resp.text
-    assert resp.content == b"mp3 bytes"
+    assert resp.content == b"mp3 chunk 1 mp3 chunk 2"
     assert resp.headers["content-type"].startswith("audio/mpeg")
+    # Critical for streaming through nginx / dream-proxy: without this
+    # the reverse proxy would re-buffer the stream and undo our work.
+    assert resp.headers.get("X-Accel-Buffering") == "no"
+
+
+def test_talk_speak_handles_empty_stream(talk_client, monkeypatch):
+    """If Kokoro errors before any audio is produced, the streaming
+    response should close cleanly with empty body — the SPA's `if (!resp.ok
+    || !resp.body)` short-circuit then suppresses playback without
+    interrupting the text chat."""
+    async def fake_stream(text):
+        # Kokoro upstream failure: nothing to yield.
+        if False:
+            yield b""  # pragma: no cover
+
+    monkeypatch.setattr("routers.talk._stream_speech", fake_stream)
+
+    resp = talk_client.post("/api/talk/speak", data={"text": "silent"})
+    assert resp.status_code == 200
+    assert resp.content == b""
 
 
 # ----------------------------------------------------------------------
