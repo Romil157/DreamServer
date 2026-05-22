@@ -143,7 +143,72 @@ export default function DreamTalk() {
         body,
         credentials: 'same-origin',
       })
-      if (!resp.ok) return
+      if (!resp.ok || !resp.body) return
+
+      // Preferred path: MediaSource API plays MP3 chunks as they arrive
+      // from the dashboard-api's streaming /api/talk/speak. Time-to-first-
+      // audio drops from "wait for the whole reply to synthesise"
+      // (~5-15s on a multi-sentence reply) to "wait for the first chunk
+      // out of Kokoro" (~500ms-1s). Compared to the previous behaviour
+      // the user hears the assistant nearly immediately after text
+      // completes streaming.
+      //
+      // Browser support note: MediaSource for audio/mpeg is universal in
+      // modern browsers (97%+ as of 2026). Older browsers transparently
+      // fall through to the Blob path below — no per-user setup, no
+      // codec configuration, no permission prompts in either path.
+      const canStream =
+        typeof globalThis.MediaSource !== 'undefined' &&
+        globalThis.MediaSource.isTypeSupported?.('audio/mpeg')
+
+      if (canStream) {
+        const ms = new globalThis.MediaSource()
+        const url = URL.createObjectURL(ms)
+        const audio = new Audio(url)
+        audio.addEventListener('ended', () => URL.revokeObjectURL(url), { once: true })
+        audio.addEventListener('error', () => URL.revokeObjectURL(url), { once: true })
+        // sourceopen fires once the MediaSource is attached to the
+        // <audio> element. We can only call addSourceBuffer / appendBuffer
+        // after that, so gate the streaming loop on the event.
+        await new Promise((resolve, reject) => {
+          ms.addEventListener('sourceopen', resolve, { once: true })
+          ms.addEventListener('error', reject, { once: true })
+        })
+        const sb = ms.addSourceBuffer('audio/mpeg')
+        // Start playback as soon as the audio element has at least one
+        // sample buffered. Some browsers require this `play()` to land
+        // before the user gesture is consumed; the calling code is
+        // already inside a user-initiated flow (the prior chat submit),
+        // so autoplay is allowed.
+        audio.play().catch(() => {})
+        const reader = resp.body.getReader()
+        try {
+          while (true) {
+            const { value, done } = await reader.read()
+            if (done) break
+            // appendBuffer is async — wait for the previous chunk to
+            // commit before pushing the next one. Without this the
+            // browser throws InvalidStateError when buffers overlap.
+            await new Promise((resolve, reject) => {
+              sb.addEventListener('updateend', resolve, { once: true })
+              sb.addEventListener('error', reject, { once: true })
+              sb.appendBuffer(value)
+            })
+          }
+          if (ms.readyState === 'open') ms.endOfStream()
+        } catch {
+          if (ms.readyState === 'open') {
+            try { ms.endOfStream() } catch { /* already closed */ }
+          }
+        }
+        return
+      }
+
+      // Fallback for browsers without MediaSource support for audio/mpeg.
+      // Same behaviour as the pre-streaming path: collect the whole body
+      // into a Blob, then play. The dashboard-api is still streaming on
+      // the network — we just wait until it's all here before starting
+      // playback. Strictly no worse than today.
       const blob = await resp.blob()
       const url = URL.createObjectURL(blob)
       const audio = new Audio(url)
