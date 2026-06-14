@@ -9,8 +9,7 @@ import {
   UserPlus,
   CreditCard,
   ChevronRight,
-  Moon,
-  Sun,
+  Palette,
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
@@ -69,6 +68,13 @@ const ROUTE_GROUP_STYLES = {
   online: { dot: 'bg-emerald-400', text: 'text-theme-text-secondary', line: 'rgba(52,211,153,0.22)' },
 }
 
+const THEME_SWATCHES = {
+  dream: 'linear-gradient(135deg, #9d00ff 0%, #18181b 100%)',
+  lemonade: 'linear-gradient(135deg, #facc15 0%, #fdfbf3 100%)',
+  light: 'linear-gradient(135deg, #60a5fa 0%, #ffffff 100%)',
+  arctic: 'linear-gradient(135deg, #38bdf8 0%, #f0f9ff 100%)',
+}
+
 const routeSeverityOrder = { down: 0, unhealthy: 1, degraded: 2, unknown: 3, healthy: 4 }
 const sortRoutesBySeverity = (items) => [...(items || [])].sort((a, b) => (routeSeverityOrder[a.status] ?? 9) - (routeSeverityOrder[b.status] ?? 9))
 
@@ -78,7 +84,7 @@ const matchesEnvSearch = (key, field, query) => {
 }
 
 export default function Settings() {
-  const { theme, setTheme } = useTheme()
+  const { theme, setTheme, themes, labels } = useTheme()
   const [version, setVersion] = useState(null)
   const [storage, setStorage] = useState(null)
   const [services, setServices] = useState([])
@@ -255,15 +261,22 @@ export default function Settings() {
       <div className="max-w-5xl space-y-6 liquid-metal-sequence-grid liquid-metal-sequence-grid--services">
         <SettingsSection title="System Identity" icon={Server}><div className="grid gap-4 sm:grid-cols-2"><InfoRow label="Version" value={version?.version || 'Unknown'} /><InfoRow label="Install Date" value={version?.install_date || 'Unknown'} /><InfoRow label="Tier" value={version?.tier || 'Community'} /><InfoRow label="Uptime" value={version?.uptime || 'Unknown'} /></div></SettingsSection>
 
-        <SettingsSection title="Appearance" icon={theme === 'light' ? Sun : Moon}>
+        <SettingsSection title="Appearance" icon={Palette}>
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <p className="text-sm font-medium text-theme-text">Color mode</p>
+              <p className="text-sm font-medium text-theme-text">Theme</p>
               <p className="mt-1 text-xs text-theme-text-muted">Choose how the dashboard appears on this browser.</p>
             </div>
-            <div className="inline-flex self-start rounded-lg border border-theme-border bg-black/[0.12] p-1">
-              <ThemeModeButton active={theme !== 'light'} icon={Moon} label="Dark" onClick={() => setTheme('dream')} />
-              <ThemeModeButton active={theme === 'light'} icon={Sun} label="Light" onClick={() => setTheme('light')} />
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-theme-border bg-black/[0.12] p-1 sm:inline-grid sm:grid-cols-4">
+              {themes.map(themeId => (
+                <ThemeOptionButton
+                  key={themeId}
+                  active={theme === themeId}
+                  label={labels[themeId] || themeId}
+                  swatch={THEME_SWATCHES[themeId]}
+                  onClick={() => setTheme(themeId)}
+                />
+              ))}
             </div>
           </div>
         </SettingsSection>
@@ -305,20 +318,18 @@ export default function Settings() {
 function SettingsSection({ title, icon: Icon, children }) { return <div className="liquid-metal-frame liquid-metal-sequence-card bg-theme-card border border-theme-border rounded-xl"><div className="flex items-center gap-3 p-4 border-b border-theme-border"><Icon size={20} className="text-theme-text-muted" /><h2 className="text-lg font-semibold text-theme-text">{title}</h2></div><div className="p-4">{children}</div></div> }
 function InfoRow({ label, value }) { return <div className="flex items-center justify-between py-2 gap-4"><span className="text-sm text-theme-text-muted">{label}</span><span className="text-sm text-theme-text font-medium font-mono text-right break-all">{value}</span></div> }
 
-function ThemeModeButton({ active, icon: Icon, label, onClick }) {
+function ThemeOptionButton({ active, label, swatch, onClick }) {
   return (
     <button
       type="button"
-      onClick={onClick}
-      className={`flex h-9 items-center gap-2 rounded-md px-3 text-xs font-semibold transition-colors ${
-        active
-          ? 'bg-theme-accent/25 text-theme-accent-light'
-          : 'text-theme-text-muted hover:text-theme-text'
-      }`}
       aria-pressed={active}
+      onClick={onClick}
+      className={`flex h-9 items-center justify-center gap-2 rounded-md px-3 text-xs font-semibold transition-colors ${
+        active ? 'bg-theme-accent/25 text-theme-accent-light' : 'text-theme-text-muted hover:text-theme-text'
+      }`}
     >
-      <Icon size={14} />
-      {label}
+      <span className="h-3 w-3 shrink-0 rounded-full border border-white/20" style={{ background: swatch || 'rgb(var(--theme-accent))' }} />
+      <span>{label}</span>
     </button>
   )
 }
