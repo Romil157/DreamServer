@@ -318,6 +318,17 @@ if [[ "$DOCKER_DAEMON" == "true" ]] && docker ps --format '{{.Names}}' 2>/dev/nu
     [[ -n "$HERMES_SLASH_WORKER_COUNT" ]] || HERMES_SLASH_WORKER_COUNT="0"
 fi
 
+DREAM_MANAGED_CONTAINER_COUNT="0"
+DREAM_RUNNING_CONTAINER_COUNT="0"
+if [[ "$DOCKER_DAEMON" == "true" ]]; then
+    DREAM_MANAGED_CONTAINER_COUNT="$(
+        docker ps -a --format '{{.Names}}' 2>/dev/null | grep -c '^dream-' || true
+    )"
+    DREAM_RUNNING_CONTAINER_COUNT="$(
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -c '^dream-' || true
+    )"
+fi
+
 # Collect extension diagnostics if service registry loaded
 EXT_DIAGNOSTICS="[]"
 if [[ "${#SERVICE_IDS[@]}" -gt 0 ]]; then
@@ -332,7 +343,7 @@ elif command -v python >/dev/null 2>&1; then
     PYTHON_CMD="python"
 fi
 
-"$PYTHON_CMD" - "$CAP_FILE" "$PREFLIGHT_FILE" "$REPORT_FILE" "$DOCKER_CLI" "$DOCKER_DAEMON" "$COMPOSE_CLI" "$DASHBOARD_HTTP" "$WEBUI_HTTP" "$_DASHBOARD_PORT" "$_WEBUI_PORT" "$EXT_DIAGNOSTICS" "$STT_MODEL_CACHED" "$STT_MODEL_NAME" "$STT_RECOVERY_HINT" "$TTS_HTTP" "$TTS_PORT" "$DGX_SPARK_GPU" "$DGX_SPARK_GPU_NAME" "$DGX_SPARK_COMPUTE_CAP" "$LLAMA_CUDA_ARCHS" "$DGX_SPARK_CUDA_ARCH_STATUS" "$DGX_SPARK_CUDA_ARCH_MESSAGE" "$HERMES_SLASH_WORKER_COUNT" "$HERMES_SLASH_WORKER_MAX_COUNT" "$ROOT_DIR" <<'PY'
+"$PYTHON_CMD" - "$CAP_FILE" "$PREFLIGHT_FILE" "$REPORT_FILE" "$DOCKER_CLI" "$DOCKER_DAEMON" "$COMPOSE_CLI" "$DASHBOARD_HTTP" "$WEBUI_HTTP" "$_DASHBOARD_PORT" "$_WEBUI_PORT" "$EXT_DIAGNOSTICS" "$STT_MODEL_CACHED" "$STT_MODEL_NAME" "$STT_RECOVERY_HINT" "$TTS_HTTP" "$TTS_PORT" "$DGX_SPARK_GPU" "$DGX_SPARK_GPU_NAME" "$DGX_SPARK_COMPUTE_CAP" "$LLAMA_CUDA_ARCHS" "$DGX_SPARK_CUDA_ARCH_STATUS" "$DGX_SPARK_CUDA_ARCH_MESSAGE" "$HERMES_SLASH_WORKER_COUNT" "$HERMES_SLASH_WORKER_MAX_COUNT" "$DREAM_MANAGED_CONTAINER_COUNT" "$DREAM_RUNNING_CONTAINER_COUNT" "$ROOT_DIR" <<'PY'
 import json
 import os
 import pathlib
@@ -342,7 +353,7 @@ import sys
 from datetime import datetime, timezone
 from urllib import error, parse, request
 
-cap_file, preflight_file, report_file, docker_cli, docker_daemon, compose_cli, dashboard_http, webui_http, dashboard_port, webui_port, ext_diagnostics_json, stt_cached, stt_model_name, stt_recovery, tts_http, tts_port, dgx_spark_gpu, dgx_spark_gpu_name, dgx_spark_compute_cap, llama_cuda_archs, dgx_spark_arch_status, dgx_spark_arch_message, hermes_slash_worker_count, hermes_slash_worker_max_count, root_dir_arg = sys.argv[1:]
+cap_file, preflight_file, report_file, docker_cli, docker_daemon, compose_cli, dashboard_http, webui_http, dashboard_port, webui_port, ext_diagnostics_json, stt_cached, stt_model_name, stt_recovery, tts_http, tts_port, dgx_spark_gpu, dgx_spark_gpu_name, dgx_spark_compute_cap, llama_cuda_archs, dgx_spark_arch_status, dgx_spark_arch_message, hermes_slash_worker_count, hermes_slash_worker_max_count, dream_managed_container_count, dream_running_container_count, root_dir_arg = sys.argv[1:]
 
 cap = json.load(open(cap_file, "r", encoding="utf-8"))
 pre = json.load(open(preflight_file, "r", encoding="utf-8"))
@@ -561,6 +572,47 @@ def _parse_kv_lines(text):
 
 def _truthy(value):
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _int_arg(value):
+    try:
+        return int(str(value or "0").strip())
+    except ValueError:
+        return 0
+
+
+def _mtime(path):
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0
+
+
+def _source_mentions_zero_containers(text):
+    lowered = text.lower()
+    return (
+        "docker compose did not create any managed containers" in lowered
+        or "zero managed containers" in lowered
+    )
+
+
+def _zero_container_failure_is_stale(failure_sources, compose_launch_path):
+    if docker_daemon != "true":
+        return False
+    if _int_arg(dream_managed_container_count) <= 0 or _int_arg(dream_running_container_count) <= 0:
+        return False
+    if not compose_launch_path.exists():
+        return False
+
+    zero_source_mtimes = [
+        _mtime(path)
+        for path, text in failure_sources
+        if path and _source_mentions_zero_containers(text)
+    ]
+    if not zero_source_mtimes:
+        return False
+
+    return _mtime(compose_launch_path) > max(zero_source_mtimes)
 
 
 def _env_file_values():
@@ -1011,6 +1063,10 @@ def _collect_install_artifacts():
             if latest_report
             else {"path": None, "exists": False}
         ),
+        "current_dream_containers": {
+            "managed": _int_arg(dream_managed_container_count),
+            "running": _int_arg(dream_running_container_count),
+        },
     }
 
 
@@ -1109,7 +1165,9 @@ def _collect_install_diagnoses(artifacts):
             )
 
         lowered = combined_failure_text.lower()
-        if "docker compose did not create any managed containers" in lowered or "zero managed containers" in lowered:
+        if _source_mentions_zero_containers(
+            combined_failure_text
+        ) and not _zero_container_failure_is_stale(failure_sources, compose_launch_path):
             diagnoses.append(
                 _diagnosis(
                     "DS-COMPOSE-ZERO-CONTAINERS",
