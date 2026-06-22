@@ -84,6 +84,10 @@ services:
       # Persistent state: Hermes's HERMES_HOME. Sessions, skills, memories,
       # cron jobs, audit logs all live here.
       - ./data/hermes:/opt/data:z
+      # Hotfix for upstream KeyError on missing 'final_response' (#1497).
+      # The script monkey-patches run_agent.Agent.chat() at startup.
+      # Remove this mount once the pinned image includes the upstream fix.
+      - ./extensions/services/hermes/oneshot-keyerror-hotfix.py:/opt/hermes/docker/oneshot-keyerror-hotfix.py:ro,z
       # Bake our cli-config.yaml + SOUL.md as the defaults Hermes copies into
       # HERMES_HOME on first start (its entrypoint copies these examples into
       # /opt/data/ if the destination files don't exist yet). Mounting them
@@ -146,8 +150,13 @@ services:
     # tick cron and host the dashboard. That's the upstream-supported
     # shape; see https://hermes-agent.nousresearch.com/docs/gateway.
     command:
-      - gateway
-      - run
+      # Apply the #1497 hotfix (KeyError on missing 'final_response') then
+      # exec into the normal gateway entrypoint. exec replaces the shell so
+      # PID 1 is still the hermes process — signal handling is preserved.
+      # Remove the hotfix invocation once the pinned image includes the fix.
+      - sh
+      - -c
+      - '/opt/hermes/.venv/bin/python /opt/hermes/docker/oneshot-keyerror-hotfix.py; exec /opt/hermes/.venv/bin/hermes gateway run'
     healthcheck:
       # /api/health does not exist in the pinned upstream image, and most
       # /api/* routes are session-token gated. /api/status is explicitly
