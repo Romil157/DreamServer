@@ -119,8 +119,8 @@ fi
 #     The old broken approach ran `sh -c 'python hotfix.py; exec hermes gateway run'`
 #     which patched a throwaway process. The fix uses .pth for in-process patching
 #     so the command should be the clean `gateway run`.
-if grep -qF '- gateway' "$COMPOSE" \
-   && grep -qF '- run' "$COMPOSE" \
+if grep -qF -- '- gateway' "$COMPOSE" \
+   && grep -qF -- '- run' "$COMPOSE" \
    && ! grep -qF 'oneshot-keyerror-hotfix' "$COMPOSE"; then
     pass "compose.yaml command is clean 'gateway run' (no shell wrapper)"
 else
@@ -143,18 +143,111 @@ else
     fail "bootstrap-upgrade.sh does not reference #1497"
 fi
 
-# ── Functional test ─────────────────────────────────────────────────────
-# This is the critical test the old script missed: prove the patch actually
-# intercepts Agent.chat IN THE SAME PROCESS that would handle chat requests.
-# We create a fake run_agent.Agent with a .chat() that raises
-# KeyError('final_response'), import dream_hotfix_1497, then verify
-# the patched .chat() returns "" instead of raising.
+# ── Functional test: sys.meta_path hook path (primary) ──────────────────
+# This is the CRITICAL test: prove the .pth → import dream_hotfix_1497 →
+# sys.meta_path hook → import run_agent → Agent.chat patched path works
+# in a fresh interpreter, matching the production startup sequence.
+#
+# We create a temp directory with a fake run_agent.py on disk, put both it
+# and the hotfix module on PYTHONPATH, then run a fresh Python subprocess
+# that imports dream_hotfix_1497 (installs hook) and then imports run_agent
+# (triggers hook).  This is exactly what the .pth file does at interpreter
+# startup inside the Hermes container.
+#
+# NOTE: The compose mount hard-codes the Python 3.11 venv path
+# (/opt/hermes/.venv/lib/python3.11/site-packages).  If the pinned Hermes
+# image is bumped to a different Python version, the mount path must be
+# updated — that is a separate maintenance concern tracked in compose.yaml.
 
 echo ""
-echo "--- Functional: in-process monkey-patch verification ---"
+echo "--- Functional: sys.meta_path hook fires on fresh import (primary) ---"
 
 if [[ -z "$_py_cmd" ]]; then
-    fail "SKIPPED functional test: no Python interpreter found"
+    fail "SKIPPED functional hook test: no Python interpreter found"
+else
+    _hook_tmpdir=$(mktemp -d)
+    trap 'rm -rf "$_hook_tmpdir"' EXIT
+
+    # Create a fake run_agent.py on disk (NOT pre-loaded into sys.modules).
+    cat > "$_hook_tmpdir/run_agent.py" <<'FAKE_RUN_AGENT'
+class Agent:
+    def chat(self, prompt, *args, **kwargs):
+        # Simulates the upstream bug: result['final_response'] on a
+        # response dict that has no 'final_response' key.
+        raise KeyError('final_response')
+FAKE_RUN_AGENT
+
+    _hotfix_dir=$(dirname "$HOTFIX")
+
+    # Run in a FRESH subprocess with PYTHONPATH set so both the hotfix
+    # module and the fake run_agent.py are importable — no sys.modules
+    # pre-loading, no direct apply() call.
+    _hook_result=$(PYTHONPATH="$_hotfix_dir:$_hook_tmpdir" $_py_cmd -c "
+import sys
+
+# Sanity: run_agent must NOT be in sys.modules yet.
+assert 'run_agent' not in sys.modules, 'run_agent was pre-loaded'
+
+# 1. Import the hotfix — installs the sys.meta_path hook.
+#    This is what the .pth file does at interpreter startup.
+import dream_hotfix_1497
+
+# 2. Verify the hook is installed.
+hook_installed = any(
+    type(f).__name__ == '_HotfixFinder' for f in sys.meta_path
+)
+if not hook_installed:
+    print('FAIL: _HotfixFinder not found in sys.meta_path after import')
+    sys.exit(1)
+
+# 3. Import run_agent — this should trigger the hook, which wraps the
+#    real loader and calls _apply_patch() after exec_module.
+import run_agent
+
+# 4. Verify Agent.chat is patched (has the _dream_hotfix_1497 sentinel).
+if not getattr(run_agent.Agent.chat, '_dream_hotfix_1497', False):
+    print('FAIL: Agent.chat was not patched by the meta_path hook')
+    sys.exit(1)
+
+# 5. Verify the patched chat() returns '' instead of raising KeyError.
+agent = run_agent.Agent()
+try:
+    result = agent.chat('test prompt')
+except KeyError:
+    print('FAIL: Agent.chat still raises KeyError after hook patching')
+    sys.exit(1)
+
+if result != '':
+    print('FAIL: expected empty string, got: ' + repr(result))
+    sys.exit(1)
+
+# 6. Verify the hook removed itself (one-shot behavior).
+hook_still_present = any(
+    type(f).__name__ == '_HotfixFinder' for f in sys.meta_path
+)
+if hook_still_present:
+    print('FAIL: _HotfixFinder still in sys.meta_path (should be one-shot)')
+    sys.exit(1)
+
+print('OK')
+" 2>/dev/null)
+
+    if [[ "$_hook_result" == "OK" ]]; then
+        pass "functional (hook): sys.meta_path hook patches Agent.chat on fresh import"
+    else
+        fail "functional (hook): $_hook_result"
+    fi
+fi
+
+# ── Functional test: direct apply() helper (supplementary) ─────────────
+# This verifies the _apply_patch() / apply() helper independently —
+# useful as a unit test for the patch logic, separate from the hook wiring.
+
+echo ""
+echo "--- Functional: direct apply() verification (supplementary) ---"
+
+if [[ -z "$_py_cmd" ]]; then
+    fail "SKIPPED functional apply test: no Python interpreter found"
 else
     _func_result=$($_py_cmd -c "
 import sys, types, os
@@ -164,17 +257,12 @@ fake_run_agent = types.ModuleType('run_agent')
 
 class FakeAgent:
     def chat(self, prompt, *args, **kwargs):
-        # Simulates the upstream bug: result['final_response'] on a
-        # response dict that has no 'final_response' key.
         raise KeyError('final_response')
 
 fake_run_agent.Agent = FakeAgent
 sys.modules['run_agent'] = fake_run_agent
 
-# 2. Import the hotfix — this should install the meta_path hook.
-#    Since run_agent is already in sys.modules, the hook won't fire
-#    on import. We call apply() directly to patch.
-sys.path.insert(0, os.path.dirname('$HOTFIX'))
+# 2. Import the hotfix and call apply() directly.
 hotfix_dir = os.path.dirname(os.path.abspath('$HOTFIX'))
 sys.path.insert(0, hotfix_dir)
 import dream_hotfix_1497
@@ -222,9 +310,9 @@ print('OK')
 " 2>/dev/null)
 
     if [[ "$_func_result" == "OK" ]]; then
-        pass "functional: monkey-patch intercepts KeyError('final_response') in-process"
+        pass "functional (apply): monkey-patch intercepts KeyError('final_response') in-process"
     else
-        fail "functional: $_func_result"
+        fail "functional (apply): $_func_result"
     fi
 fi
 

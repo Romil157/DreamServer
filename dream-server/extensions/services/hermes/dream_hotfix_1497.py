@@ -29,6 +29,7 @@ from __future__ import annotations
 import importlib
 import importlib.abc
 import importlib.machinery
+import importlib.util
 import logging
 import sys
 
@@ -90,32 +91,61 @@ apply = _apply_patch
 
 # ---------------------------------------------------------------------------
 # sys.meta_path import hook — fires when `run_agent` is first imported
+#
+# Uses the modern find_spec protocol (PEP 451, Python 3.4+).  The legacy
+# find_module / load_module protocol is deprecated since 3.4 and REMOVED
+# from the import system's call path in Python 3.12+, so any finder that
+# only implements find_module will silently never fire on 3.12+.
+#
+# The pinned Hermes image (v2026.5.16) ships Python 3.11, but this hook
+# must remain forward-compatible so an image bump doesn't silently break
+# the hotfix.  The compose mount hard-codes the python3.11 venv path
+# (/opt/hermes/.venv/lib/python3.11/site-packages); bumping the image's
+# Python version is a separate maintenance concern.
 # ---------------------------------------------------------------------------
 
+class _PatchingLoader:
+    """Wraps the real loader; applies the hotfix after exec_module."""
+
+    def __init__(self, real_loader):
+        self._real = real_loader
+
+    def create_module(self, spec):  # type: ignore[override]
+        if hasattr(self._real, "create_module"):
+            return self._real.create_module(spec)
+        return None  # use default module-creation semantics
+
+    def exec_module(self, module):  # type: ignore[override]
+        self._real.exec_module(module)
+        _apply_patch()
+
+
 class _HotfixFinder(importlib.abc.MetaPathFinder):
-    """One-shot meta-path finder that patches run_agent on first import."""
+    """One-shot meta-path finder that patches run_agent on first import.
 
-    def find_module(self, fullname, path=None):  # type: ignore[override]
-        """Called for every import.  We only care about 'run_agent'."""
-        if fullname == "run_agent":
-            return self  # claim the import so find_module -> load_module fires
-        return None
+    Implements ``find_spec`` (PEP 451) — the only finder protocol honored
+    by the import system on Python 3.12+.
+    """
 
-    def load_module(self, fullname):  # type: ignore[override]
-        """Let the real import proceed, then apply the patch."""
-        # Remove ourselves FIRST to avoid infinite recursion — the real
-        # import of run_agent will re-enter the import machinery.
+    def find_spec(self, fullname, path, target=None):  # type: ignore[override]
+        """Return a wrapped ModuleSpec for ``run_agent``; None otherwise."""
+        if fullname != "run_agent":
+            return None
+
+        # Remove ourselves FIRST to avoid infinite recursion — the call
+        # to importlib.util.find_spec below re-enters the import machinery
+        # and would match us again if we were still registered.
         if self in sys.meta_path:
             sys.meta_path.remove(self)
 
-        # Perform the real import.
-        module = importlib.import_module(fullname)
-        # Ensure it's registered in sys.modules (importlib usually does this).
-        sys.modules.setdefault(fullname, module)
+        # Ask the remaining finders for the real spec.
+        real_spec = importlib.util.find_spec(fullname)
+        if real_spec is None:
+            return None  # run_agent not on path; let import fail normally
 
-        # Now apply the patch — run_agent is fully loaded.
-        _apply_patch()
-        return module
+        # Wrap the real loader so _apply_patch() fires after exec_module.
+        real_spec.loader = _PatchingLoader(real_spec.loader)
+        return real_spec
 
 
 def install_hook() -> None:
