@@ -497,6 +497,166 @@ class TestModelActivateRollback:
         assert "LLM_MODEL=new-model" in env_path.read_text(encoding="utf-8")
         assert "filename = new-model.gguf" in models_ini.read_text(encoding="utf-8")
 
+    def test_activation_accepts_local_gguf_without_catalog_entry(self, tmp_path, monkeypatch):
+        install_dir, env_path, _env_text, models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path)
+        )
+        (install_dir / "config" / "model-library.json").write_text(
+            json.dumps({"models": []}),
+            encoding="utf-8",
+        )
+        (install_dir / "data" / "models" / "Research.Model-Q8_0.gguf").write_text(
+            "model",
+            encoding="utf-8",
+        )
+        env_path.write_text(
+            "GPU_BACKEND=nvidia\n"
+            "GGUF_FILE=old-model.gguf\n"
+            "LLM_MODEL=old-model\n"
+            "MAX_CONTEXT=65536\n"
+            "LLAMA_ARG_SPEC_TYPE=draft-mtp\n"
+            "LLAMA_ARG_SPEC_DRAFT_N_MAX=3\n"
+            "OLLAMA_PORT=8080\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.delenv("DREAM_HOST_INSTALL_DIR", raising=False)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+
+        def fake_run(cmd, **_kwargs):
+            stdout = '{"status":"ok"}' if cmd and cmd[0] == "curl" else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "Research.Model-Q8_0")
+
+        assert handler.response_code == 200
+        assert handler.parse_response() == {"status": "activated", "model_id": "Research.Model-Q8_0"}
+        env_text = env_path.read_text(encoding="utf-8")
+        assert "GGUF_FILE=Research.Model-Q8_0.gguf" in env_text
+        assert "LLM_MODEL=Research.Model-Q8_0" in env_text
+        assert "CTX_SIZE=65536" in env_text
+        assert "LLAMA_ARG_SPEC_TYPE=" not in env_text
+        assert "LLAMA_ARG_SPEC_DRAFT_N_MAX=" not in env_text
+        assert "filename = Research.Model-Q8_0.gguf" in models_ini.read_text(encoding="utf-8")
+
+    def test_activation_resolves_local_gguf_by_stem_with_mixed_case_extension(
+        self, tmp_path, monkeypatch,
+    ):
+        install_dir, env_path, _env_text, models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path)
+        )
+        (install_dir / "config" / "model-library.json").write_text(
+            json.dumps({"models": []}),
+            encoding="utf-8",
+        )
+        (install_dir / "data" / "models" / "MixedCaseModel.GGUF").write_text(
+            "model",
+            encoding="utf-8",
+        )
+        env_path.write_text(
+            "GPU_BACKEND=nvidia\n"
+            "GGUF_FILE=old-model.gguf\n"
+            "LLM_MODEL=old-model\n"
+            "MAX_CONTEXT=32768\n"
+            "OLLAMA_PORT=8080\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.delenv("DREAM_HOST_INSTALL_DIR", raising=False)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+
+        def fake_run(cmd, **_kwargs):
+            stdout = '{"status":"ok"}' if cmd and cmd[0] == "curl" else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "MixedCaseModel")
+
+        assert handler.response_code == 200
+        env_text = env_path.read_text(encoding="utf-8")
+        assert "GGUF_FILE=MixedCaseModel.GGUF" in env_text
+        assert "LLM_MODEL=MixedCaseModel" in env_text
+        assert "filename = MixedCaseModel.GGUF" in models_ini.read_text(encoding="utf-8")
+
+    def test_activation_sanitizes_local_llm_model_name_for_spaced_filename(
+        self, tmp_path, monkeypatch,
+    ):
+        install_dir, env_path, _env_text, models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path)
+        )
+        (install_dir / "config" / "model-library.json").write_text(
+            json.dumps({"models": []}),
+            encoding="utf-8",
+        )
+        (install_dir / "data" / "models" / "My Custom Model.Q8_0.GGUF").write_text(
+            "model",
+            encoding="utf-8",
+        )
+        env_path.write_text(
+            "GPU_BACKEND=nvidia\n"
+            "GGUF_FILE=old-model.gguf\n"
+            "LLM_MODEL=old-model\n"
+            "MAX_CONTEXT=32768\n"
+            "OLLAMA_PORT=8080\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.delenv("DREAM_HOST_INSTALL_DIR", raising=False)
+        monkeypatch.setattr(_mod.time, "sleep", lambda _seconds: None)
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", lambda _env: None)
+
+        def fake_run(cmd, **_kwargs):
+            stdout = '{"status":"ok"}' if cmd and cmd[0] == "curl" else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "My Custom Model.Q8_0")
+
+        assert handler.response_code == 200
+        env_text = env_path.read_text(encoding="utf-8")
+        assert "GGUF_FILE=My Custom Model.Q8_0.GGUF" in env_text
+        assert "LLM_MODEL=My-Custom-Model.Q8_0" in env_text
+        assert "[My-Custom-Model.Q8_0]" in models_ini.read_text(encoding="utf-8")
+        assert "filename = My Custom Model.Q8_0.GGUF" in models_ini.read_text(encoding="utf-8")
+
+    def test_activation_rejects_empty_local_gguf_before_restart(self, tmp_path, monkeypatch):
+        install_dir, _env_path, _env_text, _models_ini, _ini_text, _yaml, _yaml_text = (
+            _write_model_activation_fixture(tmp_path)
+        )
+        (install_dir / "config" / "model-library.json").write_text(
+            json.dumps({"models": []}),
+            encoding="utf-8",
+        )
+        (install_dir / "data" / "models" / "EmptyLocal.gguf").write_text(
+            "",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+
+        def fail_restart(_env):
+            raise AssertionError("empty GGUF should be rejected before restart")
+
+        monkeypatch.setattr(_mod, "_compose_restart_llama_server", fail_restart)
+        handler = _ResponseHandler()
+
+        _mod.AgentHandler._do_model_activate(handler, "EmptyLocal")
+
+        assert handler.response_code == 400
+        assert "not downloaded or empty" in handler.parse_response()["error"]
+
     def test_amd_activation_rewrites_lemonade_yaml_with_env_file_key(
         self, tmp_path, monkeypatch,
     ):
@@ -748,6 +908,8 @@ class TestModelActivateRollback:
                         "LLAMA_ARG_N_CPU_MOE": "30",
                         "LLAMA_ARG_NO_CACHE_PROMPT": "1",
                         "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS": "-1",
+                        "LLAMA_ARG_SPEC_TYPE": "draft-mtp",
+                        "LLAMA_ARG_SPEC_DRAFT_N_MAX": "3",
                     },
                 }],
             }]
@@ -777,6 +939,8 @@ class TestModelActivateRollback:
         assert "LLAMA_ARG_CACHE_TYPE_V=turbo3" in env_text
         assert "LLAMA_ARG_N_CPU_MOE=30" in env_text
         assert "LLAMA_ARG_CHECKPOINT_EVERY_N_TOKENS=-1" in env_text
+        assert "LLAMA_ARG_SPEC_TYPE=draft-mtp" in env_text
+        assert "LLAMA_ARG_SPEC_DRAFT_N_MAX=3" in env_text
 
     def test_unexpected_failure_rolls_back_all_config_backups(self, tmp_path, monkeypatch):
         install_dir, env_path, env_text, models_ini, ini_text, lemonade_yaml, lemonade_text = (

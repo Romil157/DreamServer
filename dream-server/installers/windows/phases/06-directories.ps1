@@ -55,12 +55,17 @@ $_dirs = @(
     (Join-Path $_configDir "litellm"),
     (Join-Path $_configDir "openclaw"),
     (Join-Path $_configDir "llama-server"),
+    (Join-Path $_dataDir "auth"),
+    (Join-Path $_dataDir "config"),
+    (Join-Path $_dataDir "config-backups"),
+    (Join-Path $_dataDir "extension-progress"),
     (Join-Path $_dataDir "open-webui"),
     (Join-Path $_dataDir "whisper"),
     (Join-Path $_dataDir "tts"),
     (Join-Path $_dataDir "n8n"),
     (Join-Path $_dataDir "qdrant"),
     (Join-Path $_dataDir "models"),
+    (Join-Path $_dataDir "user-extensions"),
     (Join-Path $_dataDir "extensions-library"),
     (Join-Path $_dataDir "comfyui"),
     (Join-Path $_dataDir "perplexica"),
@@ -85,6 +90,9 @@ $_expectedRegularFiles = @(
     ".env",
     ".env.example",
     ".env.schema.json",
+    "config\litellm\local.yaml",
+    "config\litellm\lemonade.yaml",
+    "data\.extensions-lock",
     "extensions\services\hermes\cli-config.yaml.template",
     "extensions\services\hermes\SOUL.md.template",
     "extensions\services\hermes-proxy\Caddyfile",
@@ -100,6 +108,26 @@ foreach ($_expectedFileName in $_expectedRegularFiles) {
         Write-AIWarn "Removed malformed $_expectedFileName directory from a previous partial install."
     }
 }
+
+$_containerWritableDirs = @(
+    $_dataDir,
+    (Join-Path $_dataDir "auth"),
+    (Join-Path $_dataDir "config"),
+    (Join-Path $_dataDir "config-backups"),
+    (Join-Path $_dataDir "extension-progress"),
+    (Join-Path $_dataDir "n8n"),
+    (Join-Path $_dataDir "user-extensions")
+)
+foreach ($_writableDir in $_containerWritableDirs) {
+    if (Test-Path -LiteralPath $_writableDir -PathType Container) {
+        & icacls $_writableDir /grant "*S-1-1-0:(OI)(CI)M" /T /C /Q | Out-Null
+    }
+}
+$_extensionsLock = Join-Path $_dataDir ".extensions-lock"
+if (-not (Test-Path -LiteralPath $_extensionsLock -PathType Leaf)) {
+    New-Item -ItemType File -Path $_extensionsLock -Force | Out-Null
+}
+& icacls $_extensionsLock /grant "*S-1-1-0:M" /C /Q | Out-Null
 
 # ── Copy source tree (skip if running in-place) ───────────────────────────────
 if ($sourceRoot -ne $installDir) {

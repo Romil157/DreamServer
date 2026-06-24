@@ -449,7 +449,52 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 17b. Linux AMD/Lemonade avoids host port 9000 collision with Whisper
+# 17b. Windows local mode always generates LiteLLM's local.yaml
+# ---------------------------------------------------------------------------
+echo "[contract] Windows local mode generates LiteLLM config"
+if command -v pwsh >/dev/null 2>&1; then
+    _ps_tmp="${TMPDIR:-/tmp}"
+    if ROOT_DIR="$ROOT_DIR" TEMP="$_ps_tmp" USERPROFILE="$_ps_tmp" pwsh -NoProfile -Command '
+        $ErrorActionPreference = "Stop"
+        function Write-AIWarn { param([string]$Message) Write-Host "WARN: $Message" }
+        . (Join-Path $env:ROOT_DIR "installers/windows/lib/env-generator.ps1")
+        $installDir = Join-Path $env:TEMP "dream-env-generator-windows-local-contract"
+        Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+        $litellmDir = Join-Path (Join-Path $installDir "config") "litellm"
+        New-Item -ItemType Directory -Path (Join-Path $litellmDir "local.yaml") -Force | Out-Null
+        $tier = @{
+            TierName = "Windows NVIDIA"
+            LlmModel = "test-model"
+            GgufFile = "test-local.gguf"
+            MaxContext = 4096
+        }
+        New-DreamEnv -InstallDir $installDir -TierConfig $tier -Tier "3" -GpuBackend "nvidia" -DreamMode "local" | Out-Null
+        $localConfig = Join-Path $litellmDir "local.yaml"
+        if (-not (Test-Path -LiteralPath $localConfig -PathType Leaf)) {
+            throw "Expected Windows local installs to generate config/litellm/local.yaml as a file"
+        }
+        $localText = Get-Content -LiteralPath $localConfig -Raw
+        if ($localText -notmatch "model: openai/test-local\.gguf") {
+            throw "Expected local LiteLLM config to route the selected GGUF model"
+        }
+        if ($localText -notmatch "api_base: http://llama-server:8080/v1") {
+            throw "Expected Windows NVIDIA local LiteLLM config to route through llama-server:8080/v1"
+        }
+        if ($localText -notmatch "(?m)^  request_timeout: 900$" -or $localText -notmatch "(?m)^  stream_timeout: 900$") {
+            throw "Windows local LiteLLM config must keep long-model proxy timeouts at 900s"
+        }
+    '; then
+        pass "env-generator.ps1: Windows local writes local.yaml and repairs malformed bind-mount directories"
+    else
+        fail "env-generator.ps1: Windows local LiteLLM config contract failed"
+    fi
+else
+    pass "env-generator.ps1: Windows local LiteLLM runtime test skipped (pwsh unavailable)"
+fi
+
+# ---------------------------------------------------------------------------
+# 17c. Linux AMD/Lemonade avoids host port 9000 collision with Whisper
 # ---------------------------------------------------------------------------
 echo "[contract] Linux AMD/Lemonade avoids Whisper port 9000"
 if grep -q 'AMD/Lemonade detected; reserving host port 9000' installers/phases/04-requirements.sh \
