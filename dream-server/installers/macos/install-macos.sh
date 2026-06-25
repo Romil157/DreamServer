@@ -1261,7 +1261,10 @@ else
         [[ -n "$_spec_type" ]] && _llama_args+=(--spec-type "$_spec_type")
         [[ -n "$_spec_draft_n_max" ]] && _llama_args+=(--spec-draft-n-max "$_spec_draft_n_max")
 
-        "$LLAMA_SERVER_BIN" "${_llama_args[@]}" > "$LLAMA_SERVER_LOG" 2>&1 &
+        (
+            cd "$INSTALL_DIR" || exit 1
+            exec "$LLAMA_SERVER_BIN" "${_llama_args[@]}"
+        ) > "$LLAMA_SERVER_LOG" 2>&1 &
         LLAMA_PID=$!
         echo "$LLAMA_PID" > "$LLAMA_SERVER_PID_FILE"
 
