@@ -119,8 +119,8 @@ fi
 #     The old broken approach ran `sh -c 'python hotfix.py; exec hermes gateway run'`
 #     which patched a throwaway process. The fix uses .pth for in-process patching
 #     so the command should be the clean `gateway run`.
-if grep -qF '- gateway' "$COMPOSE" \
-   && grep -qF '- run' "$COMPOSE" \
+if grep -qF -- '- gateway' "$COMPOSE" \
+   && grep -qF -- '- run' "$COMPOSE" \
    && ! grep -qF 'oneshot-keyerror-hotfix' "$COMPOSE"; then
     pass "compose.yaml command is clean 'gateway run' (no shell wrapper)"
 else
