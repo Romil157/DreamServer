@@ -174,6 +174,8 @@ EOF
         $previous = [Environment]::CurrentDirectory
         [Environment]::CurrentDirectory = $env:INSTALL_DIR
         try {
+            Initialize-ODSWindowsDockerClientConfig -InstallDir $env:INSTALL_DIR
+            $expectedDockerConfig = Join-Path (Join-Path $env:INSTALL_DIR "data") "docker-client-public"
             Assert-ODSWindowsComposeCwd -InstallDir $env:INSTALL_DIR
             Write-ODSWindowsComposeLaunchRecord -InstallDir $env:INSTALL_DIR `
                 -ComposeFlags @("--env-file", ".env", "-f", "docker-compose.base.yml") `
@@ -190,7 +192,8 @@ EOF
         foreach ($needle in @(
             "cwd=$env:INSTALL_DIR",
             "dotnet_cwd=$env:INSTALL_DIR",
-            "compose_command=docker compose --env-file .env -f docker-compose.base.yml up -d --remove-orphans --no-build",
+            "docker_config=$expectedDockerConfig",
+            "compose_command=docker --config `"$expectedDockerConfig`" compose --env-file .env -f docker-compose.base.yml up -d --remove-orphans --no-build",
             "compose_ps_command=cd"
         )) {
             if (-not $text.Contains($needle)) { throw "missing $needle" }
