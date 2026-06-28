@@ -81,6 +81,12 @@ awk '/cmd_restart\(\)/,/^}/' ods-cli | grep -q '_ods_cli_maybe_resume_bootstrap_
   || { echo "[FAIL] ods restart must retry failed bootstrap upgrades"; exit 1; }
 awk '/cmd_start\(\)/,/^}/' ods-cli | grep -q '_ods_cli_maybe_resume_bootstrap_upgrade' \
   || { echo "[FAIL] ods start must retry failed bootstrap upgrades"; exit 1; }
+awk '/cmd_restart\(\)/,/^}/' ods-cli | grep -q '_ods_cli_wait_for_bootstrap_compose_safe' \
+  || { echo "[FAIL] ods restart must wait for active bootstrap hot-swaps before compose"; exit 1; }
+awk '/cmd_start\(\)/,/^}/' ods-cli | grep -q '_ods_cli_wait_for_bootstrap_compose_safe' \
+  || { echo "[FAIL] ods start must wait for active bootstrap hot-swaps before compose"; exit 1; }
+grep -q 'starting|verifying|swapping' ods-cli \
+  || { echo "[FAIL] ods-cli bootstrap compose guard must include swapping"; exit 1; }
 
 echo "[contract] macOS host-agent LaunchAgent install-dir"
 bash tests/test-macos-host-agent-verification.sh

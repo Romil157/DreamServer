@@ -319,6 +319,25 @@ restore_docker_llama_server_after_swap_failure() {
     return 1
 }
 
+docker_llama_server_container_failed_after_swap() {
+    [[ -n "${DOCKER_CMD:-}" ]] || return 1
+
+    local state
+    state=$($DOCKER_CMD inspect ods-llama-server \
+        --format '{{.State.Status}} {{.State.Restarting}} {{.State.ExitCode}}' \
+        2>/dev/null || true)
+    case "$state" in
+        restarting*|exited*|dead*)
+            return 0
+            ;;
+        running\ true\ *|created\ true\ *)
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
 BOOTSTRAP_SWAP_BACKUP_PATH=""
 
 move_bootstrap_model_aside_for_windows_swap() {
@@ -1486,6 +1505,10 @@ elif [[ -n "$DOCKER_CMD" ]] && $DOCKER_CMD ps --filter name=ods-llama-server --f
                 _healthy=true
                 break
             fi
+        fi
+        if [[ "$_gpu_backend" != "amd" ]] && docker_llama_server_container_failed_after_swap; then
+            log "llama-server container exited or is restarting while loading the full model; treating Docker hot-swap as failed."
+            break
         fi
         sleep 5
     done

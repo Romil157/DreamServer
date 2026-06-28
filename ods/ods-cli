@@ -122,6 +122,56 @@ _env_get_raw() {
     grep -m1 "^${key}=" "$file" 2>/dev/null | cut -d= -f2- | tr -d '\r' || true
 }
 
+_ods_cli_bootstrap_status() {
+    local status_file="$INSTALL_DIR/data/bootstrap-status.json"
+    [[ -f "$status_file" ]] || return 0
+    grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$status_file" \
+        | sed -n '1p' \
+        | sed 's/.*"status"[[:space:]]*:[[:space:]]*"//' \
+        | sed 's/"//' \
+        || true
+}
+
+_ods_cli_wait_for_bootstrap_compose_safe() {
+    local action="${1:-service operation}"
+    local status_file="$INSTALL_DIR/data/bootstrap-status.json"
+    [[ -f "$status_file" ]] || return 0
+
+    local max_wait="${ODS_CLI_BOOTSTRAP_COMPOSE_WAIT_SECONDS:-900}"
+    local interval="${ODS_CLI_BOOTSTRAP_COMPOSE_WAIT_INTERVAL:-5}"
+    if ! [[ "$max_wait" =~ ^[0-9]+$ ]] || (( max_wait < 0 )); then
+        max_wait=900
+    fi
+    if ! [[ "$interval" =~ ^[0-9]+$ ]] || (( interval < 1 )); then
+        interval=5
+    fi
+
+    local waited=0 announced=false status=""
+    while true; do
+        status="$(_ods_cli_bootstrap_status)"
+        case "$status" in
+            starting|verifying|swapping)
+                if [[ "$announced" == "false" ]]; then
+                    log "  Model Upgrade: $status; waiting before $action touches llama-server"
+                    announced=true
+                fi
+                if (( waited >= max_wait )); then
+                    warn "Model upgrade is still $status after ${max_wait}s; refusing to run $action against an active hot-swap."
+                    return 1
+                fi
+                sleep "$interval"
+                waited=$(( waited + interval ))
+                ;;
+            *)
+                if [[ "$announced" == "true" ]]; then
+                    log "  Model Upgrade: ${status:-idle}; continuing with $action"
+                fi
+                return 0
+                ;;
+        esac
+    done
+}
+
 _get_host_logical_cpus() {
     local cores
     cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1")
@@ -976,8 +1026,8 @@ cmd_status() {
     local bootstrap_file="$INSTALL_DIR/data/bootstrap-status.json"
     if [[ -f "$bootstrap_file" ]]; then
         local bs_status
-        bs_status=$(grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$bootstrap_file" | sed -n '1p' | sed 's/.*"status"[[:space:]]*:[[:space:]]*"//' | sed 's/"//' || true)
-        if [[ "$bs_status" == "downloading" || "$bs_status" == "starting" || "$bs_status" == "verifying" ]]; then
+        bs_status="$(_ods_cli_bootstrap_status)"
+        if [[ "$bs_status" == "downloading" || "$bs_status" == "starting" || "$bs_status" == "verifying" || "$bs_status" == "swapping" ]]; then
             local bs_model bs_percent
             bs_model=$(grep -o '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$bootstrap_file" | sed -n '1p' | sed 's/.*"model"[[:space:]]*:[[:space:]]*"//' | sed 's/"//' || true)
             bs_percent=$(grep -o '"percent"[[:space:]]*:[[:space:]]*[0-9.]*' "$bootstrap_file" | sed -n '1p' | sed 's/.*:[[:space:]]*//' || true)
@@ -1165,6 +1215,10 @@ cmd_restart() {
         _ods_cli_refresh_soul || true
     fi
 
+    if [[ -z "$resolved_service" || "$resolved_service" == "llama-server" ]]; then
+        _ods_cli_wait_for_bootstrap_compose_safe "restart"
+    fi
+
     if [[ -z "$resolved_service" ]]; then
         _compose_run_with_summary "Restarting all services" "${flags[@]}" up -d
     else
@@ -1306,6 +1360,10 @@ cmd_start() {
     if [[ -z "$resolved_service" || "$resolved_service" == "hermes" ]]; then
         refresh_soul="true"
         _ods_cli_refresh_soul || true
+    fi
+
+    if [[ -z "$resolved_service" || "$resolved_service" == "llama-server" ]]; then
+        _ods_cli_wait_for_bootstrap_compose_safe "start"
     fi
 
     if [[ -z "$resolved_service" ]]; then

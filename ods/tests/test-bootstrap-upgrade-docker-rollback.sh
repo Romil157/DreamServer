@@ -38,6 +38,11 @@ case " $* " in
     exit 0
     ;;
 esac
+printf 'health:%s\n' "$*" >> "${ODS_FAKE_CURL_LOG:?}"
+if [[ " $* " == *"11434/health"* ]] && grep -q '^GGUF_FILE=Bootstrap.gguf$' .env 2>/dev/null; then
+  printf '{"status":"ok"}\n'
+  exit 0
+fi
 exit 7
 EOF
 chmod +x "$fakebin/curl"
@@ -86,6 +91,10 @@ case "${1:-}" in
         ;;
     inspect)
         if [[ "${2:-}" == "ods-llama-server" ]]; then
+            if [[ " $* " == *".State.Status"* ]]; then
+                printf 'restarting true 1\n'
+                exit 0
+            fi
             printf '/app/llama-server --model /models/%s --ctx-size %s\n' \
                 "$(env_value GGUF_FILE)" "$(env_value CTX_SIZE)"
         fi
@@ -120,8 +129,10 @@ EOF
 printf 'bootstrap\n' > "$install_dir/data/models/Bootstrap.gguf"
 printf 'full-model\n' > "$install_dir/data/models/Full.gguf"
 
+curl_calls="$tmp/curl-calls.log"
+
 set +e
-PATH="$fakebin:$PATH" ODS_FAKE_DOCKER_LOG="$docker_calls" bash "$TARGET" \
+PATH="$fakebin:$PATH" ODS_FAKE_DOCKER_LOG="$docker_calls" ODS_FAKE_CURL_LOG="$curl_calls" bash "$TARGET" \
     "$install_dir" \
     "Full.gguf" \
     "https://example.invalid/Full.gguf" \
@@ -148,6 +159,11 @@ grep -q 'compose-up:Bootstrap.gguf' "$docker_calls" \
     || fail "rollback must recreate llama-server from the restored bootstrap config"
 grep -q 'Restoring previous active model config after Docker llama-server swap failure' "$tmp/bootstrap.log" \
     || fail "bootstrap-upgrade should log the Docker rollback"
+grep -q 'llama-server container exited or is restarting while loading the full model' "$tmp/bootstrap.log" \
+    || fail "bootstrap-upgrade should detect a failed llama-server container before waiting for the full health timeout"
+health_attempts=$(grep -c '^health:' "$curl_calls" 2>/dev/null || true)
+[[ "$health_attempts" -lt 60 ]] \
+    || fail "failed Docker hot-swap should not wait for all health attempts after the container is restarting"
 grep -q '"status": "failed"' "$install_dir/data/bootstrap-status.json" \
     || fail "failed Docker hot-swap must mark bootstrap-status failed"
 
