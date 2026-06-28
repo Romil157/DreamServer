@@ -62,7 +62,7 @@ grep -qF 'ODS_ALLOW_DREAMSERVER_PARALLEL' installers/phases/01-preflight.sh \
   || { echo "[FAIL] Linux installer preflight must gate legacy DreamServer coexistence"; exit 1; }
 grep -qF 'name=^/dream-' installers/phases/01-preflight.sh \
   || { echo "[FAIL] Linux installer preflight must detect legacy DreamServer containers"; exit 1; }
-grep -qFx 'ods/ods-cli text eol=lf' ../.gitattributes \
+grep -qF 'ods/ods-cli text eol=lf' ../.gitattributes \
   || { echo "[FAIL] .gitattributes must force LF checkout for extensionless ods/ods-cli"; exit 1; }
 
 echo "[contract] bootstrap download finalization is non-destructive"

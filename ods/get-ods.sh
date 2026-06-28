@@ -60,11 +60,9 @@ refuse_legacy_dreamserver_install() {
     fi
 
     if command -v docker >/dev/null 2>&1; then
-        local legacy_containers legacy_volumes
+        local legacy_containers
         legacy_containers=$(docker ps -a --filter "name=^/dream-" --format '{{.Names}}' 2>/dev/null || true)
-        legacy_volumes=$(docker volume ls --filter "name=dream" --format '{{.Name}}' 2>/dev/null || true)
         [[ -n "$legacy_containers" ]] && findings+=("containers: $(echo "$legacy_containers" | tr '\n' ' ')")
-        [[ -n "$legacy_volumes" ]] && findings+=("volumes: $(echo "$legacy_volumes" | tr '\n' ' ')")
     fi
 
     if (( ${#findings[@]} > 0 )); then

@@ -116,15 +116,13 @@ if [[ ! -d "$INSTALL_DIR" ]] && ! _ods_truthy "${ODS_ALLOW_DREAMSERVER_PARALLEL:
     fi
     if command -v docker >/dev/null 2>&1; then
         _legacy_dreamserver_containers=$(docker ps -a --filter "name=^/dream-" --format '{{.Names}}' 2>/dev/null || true)
-        _legacy_dreamserver_volumes=$(docker volume ls --filter "name=dream" --format '{{.Name}}' 2>/dev/null || true)
         [[ -n "$_legacy_dreamserver_containers" ]] && _legacy_dreamserver_findings+=("containers: $(echo "$_legacy_dreamserver_containers" | tr '\n' ' ')")
-        [[ -n "$_legacy_dreamserver_volumes" ]] && _legacy_dreamserver_findings+=("volumes: $(echo "$_legacy_dreamserver_volumes" | tr '\n' ' ')")
     fi
     if (( ${#_legacy_dreamserver_findings[@]} > 0 )); then
         printf '%s\n' "${_legacy_dreamserver_findings[@]}" | sed 's/^/[legacy DreamServer] /' >&2
         error "Existing DreamServer install detected before first ODS install. Stop, uninstall, or migrate the old DreamServer stack first. To run both intentionally, set ODS_ALLOW_DREAMSERVER_PARALLEL=1 and choose non-conflicting ports/install paths."
     fi
-    unset _legacy_dreamserver_dir _legacy_dreamserver_findings _legacy_dreamserver_containers _legacy_dreamserver_volumes
+    unset _legacy_dreamserver_dir _legacy_dreamserver_findings _legacy_dreamserver_containers
 fi
 
 # Existing installation — update in place (secrets and data are preserved)
