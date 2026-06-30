@@ -182,6 +182,7 @@ FAKE_RUN_AGENT
     # Run in a FRESH subprocess with PYTHONPATH set so both the hotfix
     # module and the fake run_agent.py are importable — no sys.modules
     # pre-loading, no direct apply() call.
+    _hook_status=0
     _hook_result=$(PYTHONPATH="$_hotfix_dir:$_hook_tmpdir" $_py_cmd -c "
 import sys
 
@@ -230,12 +231,13 @@ if hook_still_present:
     sys.exit(1)
 
 print('OK')
-" 2>/dev/null)
+" 2>&1) || _hook_status=$?
 
-    if [[ "$_hook_result" == "OK" ]]; then
+    if [[ $_hook_status -eq 0 ]]; then
         pass "functional (hook): sys.meta_path hook patches Agent.chat on fresh import"
     else
-        fail "functional (hook): $_hook_result"
+        fail "functional (hook) failed with status $_hook_status. Output:"
+        echo "$_hook_result"
     fi
 fi
 
@@ -249,7 +251,8 @@ echo "--- Functional: direct apply() verification (supplementary) ---"
 if [[ -z "$_py_cmd" ]]; then
     fail "SKIPPED functional apply test: no Python interpreter found"
 else
-    _func_result=$($_py_cmd -c "
+    _func_status=0
+    _func_result=$(HOTFIX_PATH="$HOTFIX" $_py_cmd -c "
 import sys, types, os
 
 # 1. Create a fake run_agent module with Agent.chat that raises KeyError
@@ -263,7 +266,8 @@ fake_run_agent.Agent = FakeAgent
 sys.modules['run_agent'] = fake_run_agent
 
 # 2. Import the hotfix and call apply() directly.
-hotfix_dir = os.path.dirname(os.path.abspath('$HOTFIX'))
+hotfix_path = os.environ.get('HOTFIX_PATH')
+hotfix_dir = os.path.dirname(os.path.abspath(hotfix_path))
 sys.path.insert(0, hotfix_dir)
 import dream_hotfix_1497
 patched = dream_hotfix_1497.apply()
@@ -307,12 +311,13 @@ if third:
         pass  # correct — unrelated KeyErrors propagate
 
 print('OK')
-" 2>/dev/null)
+" 2>&1) || _func_status=$?
 
-    if [[ "$_func_result" == "OK" ]]; then
+    if [[ $_func_status -eq 0 ]]; then
         pass "functional (apply): monkey-patch intercepts KeyError('final_response') in-process"
     else
-        fail "functional (apply): $_func_result"
+        fail "functional (apply) failed with status $_func_status. Output:"
+        echo "$_func_result"
     fi
 fi
 
